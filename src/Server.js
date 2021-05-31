@@ -1,27 +1,34 @@
 import path from 'path';
-import connect from 'connect';
+import fs from 'fs';
+import express from 'express';
 import compression from 'compression';
 import serveStatic from 'serve-static';
 import consola from 'consola';
 import events from './utils/events';
-import rextMiddleware from './middleware/rext';
+import doRender from './lib/doRender';
 
 export default class Server {
   constructor(options) {
     this.options = options;
-    this.app = connect();
+    this.app = express();
 
     this.devMiddleware = null;
+    this.definedRoute = {};
+
+    this.resources = {};
 
     if (options.dev) {
       events.on('devMiddleware', (m) => {
         this.devMiddleware = m;
       });
+      events.on('resources', (mfs) => this.loadResources(mfs));
     }
 
+    this.defineRoutes = this.defineRoutes.bind(this);
     this.ready = this.ready.bind(this);
     this.setupMiddleware = this.setupMiddleware.bind(this);
     this.useMiddleware = this.useMiddleware.bind(this);
+    this.loadResources = this.loadResources.bind(this);
     this.listen = this.listen.bind(this);
   }
 
@@ -33,13 +40,55 @@ export default class Server {
     return events.emit(name, ...args);
   }
 
+  loadResources(_fs) {
+    const { options, defineRoutes } = this;
+    const { dir, build } = options;
+
+    let result = {};
+
+    try {
+      const fullPath = path.join(dir.root, dir.build, build.dir.manifest);
+
+      if (!_fs.existsSync(fullPath)) return result;
+
+      const contents = _fs.readFileSync(fullPath, 'utf-8');
+
+      result = JSON.parse(contents) || {};
+    } catch (err) {
+      consola.error('Unable to load resource:', err);
+    }
+
+    this.resources = result;
+
+    defineRoutes(Object.keys(result));
+  }
+
+  defineRoutes(names = []) {
+    const { resources, options, useMiddleware } = this;
+    names.forEach((name) => {
+      if (this.definedRoute[name]) return;
+      const routePath = name
+        .replace(/^_error$/, '*')
+        .replace(new RegExp('/?index$'), '')
+        .replace(/_/g, ':');
+
+      useMiddleware({
+        route: `/${routePath}`,
+        handle: doRender({ name, resources, options }),
+      });
+      this.definedRoute[name] = true;
+    });
+  }
+
   async ready() {
-    const { _readyCalled, setupMiddleware } = this;
+    const { _readyCalled, setupMiddleware, options, loadResources } = this;
     if (_readyCalled) return this;
     this._readyCalled = true;
 
     // Setup nuxt middleware
     await setupMiddleware();
+
+    if (!options.dev) await loadResources(fs);
 
     return this;
   }
@@ -72,9 +121,6 @@ export default class Server {
         useMiddleware({ route: `/${build.dir.static}`, handle: staticMiddleware });
       }
     }
-
-    // Finally use router middleware
-    useMiddleware(rextMiddleware(this));
   }
 
   useMiddleware(middleware) {
