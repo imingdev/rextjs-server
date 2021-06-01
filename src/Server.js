@@ -13,7 +13,6 @@ export default class Server {
     this.app = express();
 
     this.devMiddleware = null;
-    this.definedRoute = {};
 
     this.resources = {};
 
@@ -21,14 +20,16 @@ export default class Server {
       events.on('devMiddleware', (m) => {
         this.devMiddleware = m;
       });
-      events.on('resources', (mfs) => this.loadResources(mfs));
+      events.on('resources', (mfs) => {
+        this.loadResources(mfs);
+      });
     }
 
-    this.defineRoutes = this.defineRoutes.bind(this);
     this.ready = this.ready.bind(this);
     this.setupMiddleware = this.setupMiddleware.bind(this);
     this.useMiddleware = this.useMiddleware.bind(this);
     this.loadResources = this.loadResources.bind(this);
+    this.defineRoutes = this.defineRoutes.bind(this);
     this.listen = this.listen.bind(this);
   }
 
@@ -49,7 +50,7 @@ export default class Server {
     try {
       const fullPath = path.join(dir.root, dir.build, build.dir.manifest);
 
-      if (!_fs.existsSync(fullPath)) return result;
+      if (!_fs.existsSync(fullPath)) return;
 
       const contents = _fs.readFileSync(fullPath, 'utf-8');
 
@@ -64,19 +65,17 @@ export default class Server {
   }
 
   defineRoutes(names = []) {
-    const { resources, options, useMiddleware } = this;
-    names.forEach((name) => {
-      if (this.definedRoute[name]) return;
-      const routePath = name
-        .replace(/^_error$/, '*')
-        .replace(new RegExp('/?index$'), '')
-        .replace(/_/g, ':');
+    const { resources, options, app, _definedRoute } = this;
+    this._definedRoute = _definedRoute || {};
 
-      useMiddleware({
-        route: `/${routePath}`,
-        handle: doRender({ name, resources, options }),
-      });
-      this.definedRoute[name] = true;
+    names.forEach((name) => {
+      if (this._definedRoute[name]) return;
+      const routePath = name === '_error' ? '*' : `/${name
+        .replace(new RegExp('/?index$'), '')
+        .replace(/_/g, ':')}`;
+
+      app.get(routePath, doRender({ name, resources, options }));
+      this._definedRoute[name] = true;
     });
   }
 
