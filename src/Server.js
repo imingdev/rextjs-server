@@ -1,11 +1,11 @@
 import path from 'path';
 import fs from 'fs';
+import { match } from 'path-to-regexp';
 import express from 'express';
 import compression from 'compression';
 import serveStatic from 'serve-static';
 import consola from 'consola';
-import events from './utils/events';
-import doRender from './lib/doRender';
+import Renderer from './lib/Renderer';
 
 export default class Server {
   constructor(options) {
@@ -16,33 +16,40 @@ export default class Server {
 
     this.resources = {};
 
-    if (options.dev) {
-      events.on('devMiddleware', (m) => {
-        this.devMiddleware = m;
-      });
-      events.on('resources', (mfs) => {
-        this.loadResources(mfs);
-      });
-    }
+    this.routeStacks = [];
+
+    this.renderer = new Renderer(this);
 
     this.ready = this.ready.bind(this);
     this.setupMiddleware = this.setupMiddleware.bind(this);
     this.useMiddleware = this.useMiddleware.bind(this);
+    this.setBuilderInstance = this.setBuilderInstance.bind(this);
+    this.getAssets = this.getAssets.bind(this);
     this.loadResources = this.loadResources.bind(this);
-    this.defineRoutes = this.defineRoutes.bind(this);
+    this.getContext = this.getContext.bind(this);
     this.listen = this.listen.bind(this);
   }
 
-  on(name, cb) {
-    return events.on(name, cb);
+  /**
+   * 设置builder 实例
+   * @param builder
+   */
+  async setBuilderInstance(builder) {
+    const { loadResources } = this;
+
+    if (builder) {
+      if (builder.middleware) this.devMiddleware = builder.middleware;
+      if (builder.mfs) await loadResources(builder.mfs);
+    }
   }
 
-  emit(name, ...args) {
-    return events.emit(name, ...args);
-  }
-
+  /**
+   * load client resources
+   * @param _fs fs|mfs
+   * @returns Promise({{}})
+   */
   loadResources(_fs) {
-    const { options, defineRoutes } = this;
+    const { options } = this;
     const { dir, build } = options;
 
     let result = {};
@@ -50,33 +57,61 @@ export default class Server {
     try {
       const fullPath = path.join(dir.root, dir.build, build.dir.manifest);
 
-      if (!_fs.existsSync(fullPath)) return;
+      if (_fs.existsSync(fullPath)) {
+        const contents = _fs.readFileSync(fullPath, 'utf-8');
 
-      const contents = _fs.readFileSync(fullPath, 'utf-8');
-
-      result = JSON.parse(contents) || {};
+        result = JSON.parse(contents) || {};
+      }
     } catch (err) {
-      consola.error('Unable to load resource:', err);
+      result = {};
     }
 
     this.resources = result;
+    this.routeStacks = Object.keys(result).map((name) => {
+      let pathName;
+      if (name === '_error') {
+        pathName = '(.*)';
+      } else {
+        pathName = name.replace(new RegExp('/?index$'), '').replace(/_/g, ':');
+        pathName = `/${pathName}`;
+      }
+      return ({
+        match: match(pathName, { decode: decodeURIComponent, strict: true, end: true, sensitive: false }),
+        entry: name,
+      });
+    });
 
-    defineRoutes(Object.keys(result));
+    return Promise.resolve(result);
   }
 
-  defineRoutes(names = []) {
-    const { resources, options, app, _definedRoute } = this;
-    this._definedRoute = _definedRoute || {};
+  /**
+   * get client assets
+   * @param name  client manifest name
+   * @returns {{styles: string[], scripts: string[]}}
+   */
+  getAssets(name) {
+    const { resources } = this;
 
-    names.forEach((name) => {
-      if (this._definedRoute[name]) return;
-      const routePath = name === '_error' ? '*' : `/${name
-        .replace(new RegExp('/?index$'), '')
-        .replace(/_/g, ':')}`;
+    const defaultResult = {
+      styles: [],
+      scripts: [],
+    };
 
-      app.get(routePath, doRender({ name, resources, options }));
-      this._definedRoute[name] = true;
-    });
+    const res = resources[name] || [];
+    if (!res.length) return defaultResult;
+
+    return {
+      styles: res.filter((row) => /\.css$/.test(row)),
+      scripts: res.filter((row) => /\.js$/.test(row) && !/\.hot-update.js$/.test(row)),
+    };
+  }
+
+  getContext(context) {
+    const contextHandle = this.options.server.getContext;
+
+    if (typeof contextHandle === 'function') return contextHandle(context);
+
+    return context;
   }
 
   async ready() {
@@ -93,16 +128,16 @@ export default class Server {
   }
 
   setupMiddleware() {
-    const { options, useMiddleware } = this;
+    const { options, useMiddleware, renderer } = this;
     const { dev, server, build, dir } = options;
-    const { compressor } = server || {};
+    const { compressor, middleware } = server || {};
 
     if (dev) {
       useMiddleware((req, res, next) => {
         const { devMiddleware } = this;
-        if (!devMiddleware) return next();
+        if (devMiddleware) return devMiddleware(req, res, next);
 
-        devMiddleware(req, res, next);
+        return next();
       });
     } else {
       // gzip
@@ -117,9 +152,18 @@ export default class Server {
       if (!build.publicPath.startsWith('http')) {
         // static
         const staticMiddleware = serveStatic(path.join(dir.root, dir.build, build.dir.static));
-        useMiddleware({ route: `/${build.dir.static}`, handle: staticMiddleware });
+        useMiddleware({
+          route: `/${build.dir.static}`,
+          handle: staticMiddleware,
+        });
       }
     }
+
+    // Add user provided middleware
+    (middleware || []).forEach(useMiddleware);
+
+    // Finally use routerMiddleware
+    useMiddleware(renderer.render);
   }
 
   useMiddleware(middleware) {
