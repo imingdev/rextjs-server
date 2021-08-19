@@ -1,8 +1,12 @@
 import path from 'path';
 import React from 'react';
+import parseUrl from 'parseurl';
 import ReactDOMServer from 'react-dom/server';
 import { Helmet } from 'react-helmet';
 import lodash from 'lodash';
+import qs from 'qs';
+
+const queryParse = qs.parse;
 
 export default class Renderer {
   constructor(server) {
@@ -11,10 +15,11 @@ export default class Renderer {
 
     this.cache = {};
 
-    this.getAssets = server.getAssets;
-    this.getContext = server.getContext;
+    this.getAssets = server.getAssets.bind(server);
+    this.getContext = server.getContext.bind(server);
 
     this.getCurrentRoute = this.getCurrentRoute.bind(this);
+    this.resolve = this.resolve.bind(this);
     this.requireReactComponent = this.requireReactComponent.bind(this);
     this.createReactElement = this.createReactElement.bind(this);
     this.renderReactToString = this.renderReactToString.bind(this);
@@ -22,25 +27,31 @@ export default class Renderer {
     this.render = this.render.bind(this);
   }
 
-  getCurrentRoute(url) {
+  getCurrentRoute(req) {
     const routes = this.server.routeStacks;
+    const { pathname, query } = parseUrl(req);
 
-    for (let i = 0, { length } = routes; i < length; i++) {
+    for (let i = 0, { length } = routes; i < length; i += 1) {
       const { match, entry } = routes[i];
-      const result = match(url);
+      const result = match(pathname);
       if (result) {
-        const { path } = result;
         const params = {};
         Object.keys(result.params).forEach((name) => {
-          if (+name) params[name] = result.params[name];
+          params[name] = result.params[name];
         });
         return {
-          url: path,
           params,
+          query: queryParse(query) || {},
           entry,
         };
       }
     }
+
+    return {
+      params: {},
+      query: {},
+      entry: '_error',
+    };
   }
 
   resolve(...p) {
@@ -82,7 +93,7 @@ export default class Renderer {
 
   async render(req, res, next) {
     const {
-      config,
+      options,
       getCurrentRoute,
       getContext,
       getAssets,
@@ -90,13 +101,13 @@ export default class Renderer {
       renderReactToString,
       renderReactToStaticMarkup,
     } = this;
-    const { entry, url, params } = getCurrentRoute(req.url);
+    const { entry, params, query } = getCurrentRoute(req);
 
     // Get assets
     const { scripts: pageScripts, styles: pageStyles } = getAssets(entry);
 
     // Get context
-    const context = getContext({ req: { ...req, url, params }, params, query: req.query || {}, res });
+    const context = getContext({ req: { ...req, params, query }, params, query, res });
 
     // Document
     const { Component: Document } = requireReactComponent('_document.js');
@@ -135,8 +146,8 @@ export default class Renderer {
         pageStyles,
         state,
         helmet,
-        context: config.globals.context,
-        id: config.globals.id,
+        context: options.globals.context,
+        id: options.globals.id,
       });
 
       const html = `<!doctype html>${content}`;

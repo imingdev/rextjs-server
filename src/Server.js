@@ -1,7 +1,7 @@
 import path from 'path';
 import fs from 'fs';
 import { match } from 'path-to-regexp';
-import express from 'express';
+import connect from 'connect';
 import compression from 'compression';
 import serveStatic from 'serve-static';
 import consola from 'consola';
@@ -10,7 +10,7 @@ import Renderer from './lib/Renderer';
 export default class Server {
   constructor(options) {
     this.options = options;
-    this.app = express();
+    this.app = connect();
 
     this.devMiddleware = null;
 
